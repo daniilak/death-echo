@@ -41,7 +41,7 @@ public final class GhostTalk {
 	}
 
 	public static void tryCemetery(DeathGhost ghost, ServerLevel level) {
-		if (!ghost.isCemetery() || level.getGameTime() < nextCemeteryAt) {
+		if (!ghost.isCemetery() || ghost.isAwake() || level.getGameTime() < nextCemeteryAt) {
 			return;
 		}
 		if (ghost.getRandom().nextFloat() > 0.35F) {
@@ -102,6 +102,17 @@ public final class GhostTalk {
 				self + ": Кто ставит блок и удивляется, что умер? Мы."
 		};
 		return lines[random.nextInt(lines.length)];
+	}
+
+	public static void announceWake(DeathGhost ghost, ServerLevel level) {
+		String name = ghost.ownerName().isEmpty() ? "ты" : ghost.ownerName();
+		String self = label(ghost);
+		String[] lines = {
+				self + ": " + name + " встал в центр. Хватит разговоров.",
+				self + ": Ты сам пришёл. Теперь бей.",
+				self + ": Могилы помнят. И мы тоже."
+		};
+		say(level, ghost, lines[ghost.getRandom().nextInt(lines.length)], 32.0);
 	}
 
 	private static String label(DeathGhost ghost) {

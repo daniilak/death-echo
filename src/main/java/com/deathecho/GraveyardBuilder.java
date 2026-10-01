@@ -131,6 +131,7 @@ public final class GraveyardBuilder {
 				continue;
 			}
 			ghost.applyRecording(DeathRecording.fromMemory(memories.get(i)), true, x, feet.getY(), z, yaw);
+			ghost.setGraveyardCenter(feet.getX() + 0.5, feet.getY(), feet.getZ() + 0.5);
 			level.addFreshEntity(ghost);
 		}
 	}

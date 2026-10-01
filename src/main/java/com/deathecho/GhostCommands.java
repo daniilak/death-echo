@@ -26,13 +26,10 @@ public final class GhostCommands {
 
 	private static int info(CommandContext<CommandSourceStack> context) {
 		GhostWorldData data = GhostWorldData.get(context.getSource().getLevel());
-		String text = "Смертей в мире: " + data.deathCount() + ". ";
+		String text = "Смертей в мире: " + data.deathCount() + ".";
 		if (data.graveyardBuilt()) {
-			text += "Кладбище: " + data.graveyardX() + " " + data.graveyardY() + " " + data.graveyardZ()
+			text += " Кладбище: " + data.graveyardX() + " " + data.graveyardY() + " " + data.graveyardZ()
 					+ " (" + data.graveyardDimension() + ").";
-		} else {
-			int left = Math.max(0, DeathEchoMod.GRAVEYARD_DEATHS - data.deathCount());
-			text += "До кладбища ещё " + left + ".";
 		}
 		String message = text;
 		context.getSource().sendSuccess(() -> Component.literal(message), false);
@@ -49,7 +46,7 @@ public final class GhostCommands {
 			));
 			return 0;
 		}
-		DeathEvents.raiseGraveyard(level, player.blockPosition(), data, false);
+		DeathEvents.raiseGraveyard(level, player.blockPosition(), data);
 		return Command.SINGLE_SUCCESS;
 	}
 }

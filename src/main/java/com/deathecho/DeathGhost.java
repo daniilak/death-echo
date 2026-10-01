@@ -1,5 +1,6 @@
 package com.deathecho;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
@@ -8,21 +9,28 @@ import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.entity.PathfinderMob;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -42,6 +50,15 @@ public class DeathGhost extends PathfinderMob {
 	private float glanceYaw;
 	private int attackCooldown = 60;
 	private int lastSwingFrame = -1;
+	private boolean provoked;
+	private boolean awakened;
+	private int strayTicks;
+	private long bornAt;
+	private long expireAt;
+	private boolean focusSet;
+	private double focusX;
+	private double focusY;
+	private double focusZ;
 
 	public DeathGhost(EntityType<? extends DeathGhost> type, Level level) {
 		super(type, level);
@@ -75,11 +92,39 @@ public class DeathGhost extends PathfinderMob {
 		this.setCustomName(Component.literal(recording.ownerName() + " #" + recording.deathNumber()));
 		this.setCustomNameVisible(true);
 		this.setHealth(this.getMaxHealth());
+		this.xpReward = cemetery ? 0 : 12;
 		ItemStack hand = cemetery ? recording.mainHand() : ItemStack.EMPTY;
 		equip(recording.armor(), recording.offhand(), hand);
 		this.moveTo(x, y, z, yaw, 0.0F);
 		this.setYHeadRot(yaw);
 		this.setYBodyRot(yaw);
+	}
+
+	public void setGraveyardCenter(double x, double y, double z) {
+		this.focusX = x;
+		this.focusY = y;
+		this.focusZ = z;
+		this.focusSet = true;
+	}
+
+	public void noteSpawn(ServerLevel level) {
+		this.bornAt = level.getGameTime();
+		if (!this.cemetery && !this.holdsLoot()) {
+			this.expireAt = this.bornAt + DeathEchoMod.EMPTY_REPLAY_TICKS;
+			trimEmpty(level, this.ownerId());
+		}
+	}
+
+	public boolean holdsLoot() {
+		return this.recording != null && this.recording.hasLoot();
+	}
+
+	public boolean isAwake() {
+		return this.awakened;
+	}
+
+	public long bornAt() {
+		return this.bornAt;
 	}
 
 	public void glanceAt(DeathGhost other) {
@@ -133,10 +178,65 @@ public class DeathGhost extends PathfinderMob {
 			return;
 		}
 		this.fallDistance = 0.0F;
+		if (fadeIfEmpty(level)) {
+			return;
+		}
 		if (this.cemetery) {
-			tickCemetery(level);
+			if (this.awakened) {
+				tickCemeteryFight(level);
+			} else {
+				tickCemetery(level);
+			}
+		} else if (this.provoked) {
+			tickFight(level);
 		} else {
 			tickReplay(level);
+		}
+	}
+
+	private boolean fadeIfEmpty(ServerLevel level) {
+		if (this.cemetery || this.holdsLoot() || this.provoked) {
+			return false;
+		}
+		if (this.expireAt == 0L) {
+			this.expireAt = level.getGameTime() + DeathEchoMod.EMPTY_REPLAY_TICKS;
+		}
+		if ((this.tickCount + this.getId()) % 40 == 0) {
+			trimEmpty(level, this.ownerId());
+		}
+		if (level.getGameTime() < this.expireAt) {
+			return false;
+		}
+		level.sendParticles(ParticleTypes.SOUL, this.getX(), this.getY() + 1.0, this.getZ(), 12, 0.3, 0.5, 0.3, 0.02);
+		this.discard();
+		return true;
+	}
+
+	private static void trimEmpty(ServerLevel level, UUID owner) {
+		if (owner == null) {
+			return;
+		}
+		List<DeathGhost> empty = new ArrayList<>();
+		level.getEntities(
+				ModEntities.DEATH_GHOST,
+				ghost -> ghost.isAlive()
+						&& !ghost.isCemetery()
+						&& !ghost.holdsLoot()
+						&& !ghost.provoked
+						&& owner.equals(ghost.ownerId()),
+				empty
+		);
+		if (empty.size() <= DeathEchoMod.MAX_EMPTY_REPLAYS) {
+			return;
+		}
+		empty.sort(Comparator.comparingLong(DeathGhost::bornAt));
+		long soon = level.getGameTime() + DeathEchoMod.EMPTY_OVERFLOW_TICKS;
+		int overflow = empty.size() - DeathEchoMod.MAX_EMPTY_REPLAYS;
+		for (int i = 0; i < overflow; i++) {
+			DeathGhost old = empty.get(i);
+			if (old.expireAt == 0L || old.expireAt > soon) {
+				old.expireAt = soon;
+			}
 		}
 	}
 
@@ -190,7 +290,22 @@ public class DeathGhost extends PathfinderMob {
 		tryAttack(level);
 	}
 
+	private void tickFight(ServerLevel level) {
+		Player player = livingOwner(level);
+		if (player == null || player.distanceToSqr(this) > DeathEchoMod.FIGHT_LEASH * DeathEchoMod.FIGHT_LEASH) {
+			this.provoked = false;
+			this.setDeltaMovement(Vec3.ZERO);
+			return;
+		}
+		chase(player);
+		tryAttack(level);
+	}
+
 	private void tickCemetery(ServerLevel level) {
+		if (tryWake(level)) {
+			tickCemeteryFight(level);
+			return;
+		}
 		this.moveTo(this.homeX, this.homeY, this.homeZ, this.getYRot(), 0.0F);
 		List<DeathGhost> others = level.getEntitiesOfClass(
 				DeathGhost.class,
@@ -216,20 +331,126 @@ public class DeathGhost extends PathfinderMob {
 		}
 	}
 
+	private boolean tryWake(ServerLevel level) {
+		Player player = livingOwner(level);
+		if (player == null || !onCenterPad(player)) {
+			return false;
+		}
+		AABB box = new AABB(this.focusX, this.focusY, this.focusZ, this.focusX, this.focusY, this.focusZ).inflate(12.0);
+		List<DeathGhost> circle = level.getEntitiesOfClass(
+				DeathGhost.class,
+				box,
+				other -> other.isAlive() && other.isCemetery() && player.getUUID().equals(other.ownerId())
+		);
+		boolean woke = false;
+		for (DeathGhost ghost : circle) {
+			if (!ghost.awakened) {
+				ghost.awakened = true;
+				ghost.strayTicks = 0;
+				woke = true;
+			}
+		}
+		if (woke) {
+			level.playSound(
+					null,
+					BlockPos.containing(this.focusX, this.focusY, this.focusZ),
+					SoundEvents.SOUL_ESCAPE.value(),
+					SoundSource.HOSTILE,
+					1.0F,
+					0.5F
+			);
+			GhostTalk.announceWake(this, level);
+		}
+		return this.awakened;
+	}
+
+	private void tickCemeteryFight(ServerLevel level) {
+		Player player = livingOwner(level);
+		if (player == null || player.distanceToSqr(this) > DeathEchoMod.GRAVEYARD_LEASH * DeathEchoMod.GRAVEYARD_LEASH) {
+			this.strayTicks++;
+			if (player == null || this.strayTicks > 60) {
+				sleepAgain();
+			}
+			return;
+		}
+		this.strayTicks = 0;
+		chase(player);
+		tryAttack(level);
+	}
+
+	private void sleepAgain() {
+		this.awakened = false;
+		this.strayTicks = 0;
+		this.setDeltaMovement(Vec3.ZERO);
+		this.setHealth(this.getMaxHealth());
+		this.moveTo(this.homeX, this.homeY, this.homeZ, this.baseYaw, 0.0F);
+		this.setYRot(this.baseYaw);
+		this.setYHeadRot(this.baseYaw);
+		this.setYBodyRot(this.baseYaw);
+	}
+
+	private void chase(Player player) {
+		double dx = player.getX() - this.getX();
+		double dy = player.getY() - this.getY();
+		double dz = player.getZ() - this.getZ();
+		double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+		if (dist > 1.6) {
+			double speed = 0.18 / dist;
+			this.setDeltaMovement(dx * speed, dy * speed, dz * speed);
+			this.move(MoverType.SELF, this.getDeltaMovement());
+		}
+		this.setDeltaMovement(Vec3.ZERO);
+		this.lookAt(player, 30.0F, 30.0F);
+		this.setYBodyRot(this.getYHeadRot());
+	}
+
+	private boolean onCenterPad(Player player) {
+		ensureFocus();
+		double dx = player.getX() - this.focusX;
+		double dz = player.getZ() - this.focusZ;
+		if (dx * dx + dz * dz > DeathEchoMod.GRAVEYARD_PAD * DeathEchoMod.GRAVEYARD_PAD) {
+			return false;
+		}
+		if (Math.abs(player.getY() - this.focusY) > 1.5) {
+			return false;
+		}
+		BlockPos ground = BlockPos.containing(player.getX(), player.getY() - 0.2, player.getZ());
+		return this.level().getBlockState(ground).is(Blocks.SOUL_SAND);
+	}
+
+	private void ensureFocus() {
+		if (this.focusSet) {
+			return;
+		}
+		float yawRad = this.baseYaw * ((float) Math.PI / 180.0F);
+		this.focusX = this.homeX - Mth.sin(yawRad) * 3.0;
+		this.focusY = this.homeY;
+		this.focusZ = this.homeZ + Mth.cos(yawRad) * 3.0;
+		this.focusSet = true;
+	}
+
+	private Player livingOwner(ServerLevel level) {
+		UUID owner = this.ownerId();
+		if (owner == null) {
+			return null;
+		}
+		Player player = level.getPlayerByUUID(owner);
+		if (player == null || !player.isAlive() || player.isSpectator() || player.isCreative()) {
+			return null;
+		}
+		return player;
+	}
+
 	private void tryAttack(ServerLevel level) {
 		if (this.attackCooldown > 0) {
 			this.attackCooldown--;
 			return;
 		}
-		UUID owner = this.ownerId();
-		if (owner == null) {
+		Player player = livingOwner(level);
+		if (player == null) {
 			return;
 		}
-		Player player = level.getPlayerByUUID(owner);
-		if (player == null || !player.isAlive() || player.isSpectator() || player.isCreative()) {
-			return;
-		}
-		if (player.distanceToSqr(this) > 2.8 * 2.8) {
+		if (player.distanceToSqr(this) > DeathEchoMod.REPLAY_HIT_RANGE * DeathEchoMod.REPLAY_HIT_RANGE) {
 			return;
 		}
 		this.attackCooldown = 16;
@@ -239,9 +460,6 @@ public class DeathGhost extends PathfinderMob {
 
 	@Override
 	public boolean hurt(DamageSource source, float amount) {
-		if (this.cemetery) {
-			return false;
-		}
 		if (source.is(DamageTypeTags.BYPASSES_INVULNERABILITY)) {
 			return super.hurt(source, amount);
 		}
@@ -252,7 +470,14 @@ public class DeathGhost extends PathfinderMob {
 		if (owner != null && !owner.equals(player.getUUID())) {
 			return false;
 		}
-		return super.hurt(source, amount);
+		if (this.cemetery && !this.awakened) {
+			return false;
+		}
+		boolean hit = super.hurt(source, amount);
+		if (hit && !this.cemetery) {
+			this.provoked = true;
+		}
+		return hit;
 	}
 
 	@Override
@@ -280,11 +505,20 @@ public class DeathGhost extends PathfinderMob {
 	public void addAdditionalSaveData(CompoundTag tag) {
 		super.addAdditionalSaveData(tag);
 		tag.putBoolean("Cemetery", this.cemetery);
+		tag.putBoolean("Provoked", this.provoked);
+		tag.putBoolean("Awake", this.awakened);
 		tag.putInt("Playback", this.playback);
+		tag.putLong("BornAt", this.bornAt);
+		tag.putLong("ExpireAt", this.expireAt);
 		tag.putDouble("HomeX", this.homeX);
 		tag.putDouble("HomeY", this.homeY);
 		tag.putDouble("HomeZ", this.homeZ);
 		tag.putFloat("BaseYaw", this.baseYaw);
+		if (this.focusSet) {
+			tag.putDouble("FocusX", this.focusX);
+			tag.putDouble("FocusY", this.focusY);
+			tag.putDouble("FocusZ", this.focusZ);
+		}
 		if (this.recording != null) {
 			tag.put("Recording", this.recording.save(this.registryAccess()));
 		}
@@ -294,11 +528,21 @@ public class DeathGhost extends PathfinderMob {
 	public void readAdditionalSaveData(CompoundTag tag) {
 		super.readAdditionalSaveData(tag);
 		this.cemetery = tag.getBoolean("Cemetery");
+		this.provoked = tag.getBoolean("Provoked");
+		this.awakened = tag.getBoolean("Awake");
 		this.playback = tag.getInt("Playback");
+		this.bornAt = tag.getLong("BornAt");
+		this.expireAt = tag.getLong("ExpireAt");
 		this.homeX = tag.getDouble("HomeX");
 		this.homeY = tag.getDouble("HomeY");
 		this.homeZ = tag.getDouble("HomeZ");
 		this.baseYaw = tag.getFloat("BaseYaw");
+		this.focusSet = tag.contains("FocusX");
+		if (this.focusSet) {
+			this.focusX = tag.getDouble("FocusX");
+			this.focusY = tag.getDouble("FocusY");
+			this.focusZ = tag.getDouble("FocusZ");
+		}
 		if (tag.contains("Recording", Tag.TAG_COMPOUND)) {
 			this.recording = DeathRecording.load(tag.getCompound("Recording"), this.registryAccess());
 			this.entityData.set(DATA_OWNER, Optional.of(this.recording.ownerId()));

@@ -55,22 +55,20 @@ public final class DeathEvents {
 			reclaimDrops(level, player.position(), recording.loot());
 		}
 
-		player.sendSystemMessage(Component.literal(deathLine(player, recording, number, data)));
+		player.sendSystemMessage(Component.literal(deathLine(player, recording, number)));
 
 		if (number >= DeathEchoMod.GRAVEYARD_DEATHS && !data.graveyardBuilt()) {
-			raiseGraveyard(level, player.blockPosition(), data, true);
+			raiseGraveyard(level, player.blockPosition(), data);
 		}
 	}
 
-	public static BlockPos raiseGraveyard(ServerLevel level, BlockPos deathPos, GhostWorldData data, boolean announceMilestone) {
+	public static BlockPos raiseGraveyard(ServerLevel level, BlockPos deathPos, GhostWorldData data) {
 		List<EchoMemory> memories = data.sample(8);
 		BlockPos feet = GraveyardBuilder.build(level, deathPos, memories);
 		data.markGraveyard(level.dimension().location().toString(), feet.getX(), feet.getY(), feet.getZ());
-		String text = announceMilestone
-				? "Смерть номер " + data.deathCount() + ". Кладбище появилось на "
-				: "Кладбище собрано на ";
-		text += feet.getX() + " " + feet.getY() + " " + feet.getZ() + ". Прошлые ты уже обсуждают тебя.";
-		Component message = Component.literal(text);
+		Component message = Component.literal(
+				"Кладбище появилось на " + feet.getX() + " " + feet.getY() + " " + feet.getZ() + "."
+		);
 		for (ServerPlayer player : level.players()) {
 			player.sendSystemMessage(message);
 		}
@@ -86,22 +84,19 @@ public final class DeathEvents {
 		MotionFrame start = recording.frames().get(0);
 		ghost.applyRecording(recording, false, start.x(), start.y(), start.z(), start.yaw());
 		level.addFreshEntity(ghost);
+		ghost.noteSpawn(level);
 		level.playSound(null, ghost.blockPosition(), SoundEvents.SOUL_ESCAPE.value(), SoundSource.HOSTILE, 0.8F, 0.7F);
 		return ghost;
 	}
 
-	private static String deathLine(ServerPlayer player, DeathRecording recording, int number, GhostWorldData data) {
-		int left = Math.max(0, DeathEchoMod.GRAVEYARD_DEATHS - number);
-		String progress = left == 0
-				? "Это была смерть, после которой собирается кладбище."
-				: "До кладбища ещё " + left + ".";
+	private static String deathLine(ServerPlayer player, DeathRecording recording, int number) {
 		if (MotionRecorder.keepsInventory(player)) {
-			return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Вещи остались у тебя. " + progress;
+			return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Вещи остались у тебя.";
 		}
 		if (!recording.hasLoot()) {
-			return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Забирать нечего, но он дерётся. " + progress;
+			return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Забирать нечего.";
 		}
-		return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Убей его, чтобы забрать вещи. " + progress;
+		return "Смерть #" + number + ". Призрак повторяет последние 5 секунд. Ударь его, чтобы забрать вещи.";
 	}
 
 	private static void reclaimDrops(ServerLevel level, Vec3 pos, List<ItemStack> loot) {
