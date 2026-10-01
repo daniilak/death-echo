@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "deathecho",
+  "version": "${version}",
+  "name": "Death Echo",
+  "description": "Every death leaves a ghost that replays your last five seconds. Fight it to take your items back. The 50th death raises a graveyard.",
+  "authors": ["MegaDaniilak"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.deathecho.DeathEchoMod"
+    ],
+    "client": [
+      "com.deathecho.client.DeathEchoClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
